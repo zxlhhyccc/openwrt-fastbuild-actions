@@ -1,299 +1,375 @@
-Building OpenWrt with GitHub Actions and Docker
+BuildWrt
 ============================================================================
 
-> I largely optimized the main building process. It is now easier to use.
+> Original OpenWrt-FastBuild-Actions
 
-This project is inspired by [P3TERX's Actions-Openwrt](https://github.com/P3TERX/Actions-OpenWrt).
+[中文说明](README_CN_OUTDATED.md)（过时的旧版本说明，不建议阅读，欢迎PR）
 
-With Github Actions and Actions-Openwrt, it is easy to build an OpenWrt firmware without running locally. However, Github Actions do not store cache and building files. This means it has to completely rebuild from source each time, even if it is a small change.
+This project accelerates OpenWrt building process in GitHub Actions. 
 
-This project uses Docker Hub or any Docker registriy for storing previous building process, allowing incremental building.
+Building OpenWrt in Github Actions can be very convenient for users who want to upgrade or modify their routers frequently. Despite convenience, users have to wait for hours for even slight changes, because cache from previous buildings is not recycled.
 
-Github Actions和Actions-Openwrt让我们可以很方便地自动化编译OpenWrt固件，而不必在本地编译。然而Github Actions不存储缓存，已编译过的文件也不会在下次编译重新被使用。这就意味着，即便只是很小的改动，每次编译我们要等上很久来重新编译整个固件。
+By storing cache in docker images, BuildWrt significantly decreases compiling duration in Github Actions. You can use Docker Hub or other Docker registries as the storage.
 
-本项目使用Docker Hub或任何Docker Registry存储编译状态，使得后续的编译可以增量进行。
+- [Features Overview](#features-overview)
+- [Usage](#usage)
+  - [Setup](#setup)
+    - [Secrets page](#secrets-page)
+  - [Building](#building)
+  - [Advanced usage](#advanced-usage)
+    - [Re-create builder](#re-create-builder)
+    - [Rebase your builder](#rebase-your-builder)
+  - [Trigger methods](#trigger-methods)
+  - [Building options](#building-options)
+    - [Examples of using building options](#examples-of-using-building-options)
+  - [Multiple target profiles](#multiple-target-profiles)
+    - [Default profile](#default-profile)
+  - [Manually adding packages](#manually-adding-packages)
+- [Details](#details)
+  - [Building process explained](#building-process-explained)
+    - [First-time building](#first-time-building)
+    - [Following buildings](#following-buildings)
+  - [Squashing Strategy](#squashing-strategy)
+- [Debugging and manually configuring](#debugging-and-manually-configuring)
+  - [Important directories](#important-directories)
+- [FAQs](#faqs)
+  - [Why all targets seem triggered when only some are intended?](#why-all-targets-seem-triggered-when-only-some-are-intended)
+- [Todo](#todo)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
 
-- [Building OpenWrt with GitHub Actions and Docker](#building-openwrt-with-github-actions-and-docker)
-  - [Features 特点](#features-%e7%89%b9%e7%82%b9)
-  - [Usage 用法](#usage-%e7%94%a8%e6%b3%95)
-    - [Basic usage 基础用法](#basic-usage-%e5%9f%ba%e7%a1%80%e7%94%a8%e6%b3%95)
-      - [First-time building 第一次编译](#first-time-building-%e7%ac%ac%e4%b8%80%e6%ac%a1%e7%bc%96%e8%af%91)
-        - [Secrets page](#secrets-page)
-      - [Following building 后续编译](#following-building-%e5%90%8e%e7%bb%ad%e7%bc%96%e8%af%91)
-    - [Advanced usage 高级用法](#advanced-usage-%e9%ab%98%e7%ba%a7%e7%94%a8%e6%b3%95)
-      - [Re-create your building environment 重建编译环境](#re-create-your-building-environment-%e9%87%8d%e5%bb%ba%e7%bc%96%e8%af%91%e7%8e%af%e5%a2%83)
-      - [Rebase your building environment 重设编译环境](#rebase-your-building-environment-%e9%87%8d%e8%ae%be%e7%bc%96%e8%af%91%e7%8e%af%e5%a2%83)
-      - [Manually trigger building and its options](#manually-trigger-building-and-its-options)
-        - [Global options](#global-options)
-        - [Options only for build-inc](#options-only-for-build-inc)
-        - [Options only for build-package](#options-only-for-build-package)
-        - [Examples](#examples)
-          - [Use github-repo-dispatcher to rebase building environment](#use-github-repo-dispatcher-to-rebase-building-environment)
-        - [Use commit message to re-create building environment](#use-commit-message-to-re-create-building-environment)
-  - [Details](#details)
-    - [Mechanism](#mechanism)
-    - [Success building job examples](#success-building-job-examples)
-    - [Building process explained](#building-process-explained)
-      - [build-inc](#build-inc)
-      - [build-package](#build-package)
-  - [FAQs](#faqs)
-    - [Why I cannot see any tag on Docker Hub website?](#why-i-cannot-see-any-tag-on-docker-hub-website)
-  - [Todo](#todo)
-  - [Acknowledgments](#acknowledgments)
-  - [License](#license)
+## Features Overview
 
-## Features 特点
-
-- Load and save building state to Docker Hub or other registries
-- Support building options
-- Various trigger methods
-  - Push with commands in commit messages
+- Building cache recycle
+- Multiple target profiles
+- Flexible pre-building customization
+  - Building config file (`.config`)
+  - Feeds config file (`feeds.conf`)
+  - Individual packages to be installed from Git repositories
+  - Files to be copied to build root
+  - Patches to be applied onto build root
+  - Shell scripts to be executed before compiling
+- Runtime customization & debug
+  - Shell accessing through SSH or Web page (allow `make menuconfig`)
+  - Debug checkpoint
+  - Failure fallback checkpoint
+- Runtime job options
+  - re-create builder
+  - packages only
+- Abundant trigger methods
+  - Push event (only changed targets are built)
+  - Commands in commit messages
   - Deployment events (you can use [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher))
   - Repository dispatch events (you can use [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher))
-  - Your repo been starred by yourself
+  - Repo been starred by yourself
   - Scheduled cron jobs
-- Two building modes (before colons are job names of Github Actions)
-  - `build-inc`: Incrementally building firmware and packages (every push, about 40 minutes for standard config, about 3 hours for first-time building)
-  - `build-package`: Incrementally building only packages (every push, about 25 minutes for standard config, useful when only enabling a package module)
 
-----
+## Usage
 
-- 在Docker Hub或其他Registry加载和存储OpenWrt编译状态
-- 支持编译选项
-- 多种触发模式
-  - Push触发，支持在commit message中包含指令
-  - Deployment事件触发（可使用[tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher)）
-  - Repository dispatch事件触发（可使用[tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher)）
-  - 自己给自己Star触发（可指定Star的触发者）
-  - 定时触发
-- 两个编译模式（冒号前是Github Actions中的job名称）
-  - `build-inc`：增量编译固件和软件包（每次push自动进行，标准配置下大约每次40分钟，第一次编译时耗时大约3小时）
-  - `build-package`：增量编译软件包（每次push自动进行，标准配置下大约每次25分钟，当仅需要编译软件安装包时比较有用）
-
-## Usage 用法
-
-**The default configuration uses [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede) as the OpenWrt Repo** (popular in China). If you want official OpenWrt 19.07, check out ["openwrt_official" branch](https://github.com/tete1030/openwrt-fastbuild-actions/tree/openwrt_official). (It's just changes of `REPO_URL` and `REPO_BRANCH` envs in `.github/workflows/build-openwrt.yml`.)
-
-Check out my own configuration in ["sample" branch](https://github.com/tete1030/openwrt-fastbuild-actions/tree/sample).
-
-### Basic usage 基础用法
-
-#### First-time building 第一次编译
-
-The building process generally takes **1.5~3 hours** depending on your config.
+### Setup
 
 1. Sign up for [GitHub Actions](https://github.com/features/actions/signup)
 2. Fork this repo
-3. **Register a Docker Hub account**. This is necessary.
-4. Get your Docker Hub **personal access token**. Fill your username and the generated token into the forked repo's **Settings->Secrets** page. Use `docker_username` for your username, and `docker_password` for your token. See [Secrets page](#secrets-page) for correct settings.
-5. *(Optional, not very useful)* If you want the debug SSH command to be sent to Slack, you can generate a Slack Webhook URL and set the url as `SLACK_WEBHOOK_URL` in the Secrets page. Search in Google if you don't know how to do it.
-6. *(Optional)* Customize `.github/workflows/build-openwrt.yml` to **change builder's name and other options**.
-7. **Generate your `.config`** and rename it to `config.diff`. Put the file in the root dir of your forked repo.
-8. *(Optional)* Customize `scripts/update_feeds.sh` for **additional packages** you want to download.
-9. *(Optional)* Put any **patch** you want to `patches` dir. The patches are applied after `update_feeds.sh` and before `download.sh`.
-10. **Commit and push** your changes. This will automatically trigger an incremental building.
-11. Wait for `build-inc` job to finish.
-12. Collect your files in the `build-inc` job's `Artifacts` menu
+3. **Register a Docker Hub account** and get your **personal access token**. Fill your username and the token into the forked repo's **Settings->Secrets** page. Use `docker_username` for your username, and `docker_password` for your token. See [Secrets page](#secrets-page) for correct settings.
+4. *(Necessary when debugging or runtime configuring)* Set either `SLACK_WEBHOOK_URL`, `TMATE_ENCRYPT_PASSWORD` or both in the Secrets page. Refer to [Debugging and manually configuring](#debugging-and-manually-configuring). See [Secrets page](#secrets-page) for correct settings.
+5. Add your building target
+   1. Copy the `user/example` folder, rename it (refered to by `${TARGET_NAME}`) and put it in `user` folder. This is your target folder.
+   2. Customize `user/${TARGET_NAME}/settings.ini`.
+   3. Put your `.config` file to `user/${TARGET_NAME}/config.diff`.
+   4. *(Optional)* Add into `user/${TARGET_NAME}/packages.txt` extra packages that are not in feeds.
+   5. *(Optional)* Add into `user/${TARGET_NAME}/custom.sh` any shell script to be executed right before compiling.
+   6. *(Optional)* Add into `user/${TARGET_NAME}/patches/` any patch to be applied onto the OpenWrt folder.
+   7. *(Optional)* Add into `user/${TARGET_NAME}/files/` any file you want to be copied into the OpenWrt folder (an exception: `.config` is not copied)
+6. Add your `${TARGET_NAME}` to `jobs.build.strategy.matrix.target` section in `.github/workflows/build-openwrt.yml` ( and to `jobs.squash.strategy.matrix.target` of `.github/workflows/squash.yml` if you are using squash strategy)
 
-----
+<!-- # TODO solve references -->
 
-1. 注册[GitHub Actions](https://github.com/features/actions/signup)
-2. Fork
-3. **注册Docker Hub**. 这步很重要
-4. 取得Docker Hub的**personal access token**。在你自己Fork的Repo中的**Settings->Secrets**页面填写你的Docker Hub用户名和token。使用“docker_username”填写用户名，使用“docker_password”填写token。详见[Secrets page](#secrets-page)。
-5. *(可选，没什么用)* 如果你想自动把SSH命令发送到Slack，你可以在Secrets页面设置`SLACK_WEBHOOK_URL`。详细方法请自行Google。
-6. *(可选)* 定制`.github/workflows/build-openwrt.yml`以修改你想在Docker Hub保存的**builder名和其他选项**。
-7. **生成你的`.config`文件**，并把它重命名为`config.diff`。把它放在根目录。
-8. *(可选)* 如果你想**放置额外安装包**，定制`scripts/update_feeds.sh`。
-9. *(可选)* 在patches目录放置**补丁文件**。补丁会自动在`update_feeds.sh`之后，`download.sh`之前执行。
-10. **Commit并Push**。这一步骤会自动触发编译。
-11. 等待`build-inc`任务完成。
-12. 在`build-inc`任务的`Artifacts`目录下载编译好的文件。
+#### Secrets page
 
-##### Secrets page
+![Secrets page](docs/imgs/secrets.png)
 
-![Secrets page](imgs/secrets.png)
+### Building
 
-#### Following building 后续编译
+The first-time building generally takes **1.5~3 hours** depending on your config.
 
-After the first-time building, you will only need the following steps to build your firmwares and packages when you change your config. The building process generally only takes **20 minutes ~ 1 hour** depending on how much your config has changed.
+After the first-time building, only **15 minutes ~ 1 hour** is needed, depending on your config and how much your config has changed.
 
-1. *(Optional)* Modify your `config.diff` if you want.
-2. *(Optional)* Customize `scripts/update_feeds.sh` for **additional packages** you want to download.
-3. *(Optional)* Put any **patch** you want to `patches` dir.
-4. Commit and push your changes. If you want to do `build-inc`, you don't need any special step. If you need `build-package`, you can include this string in your last commit message before push: `#build-package#`.
-5. Wait for `build-inc` or `build-package` to finish
-6. Collect your files in the `build-inc` or `build-package` job's "Artifacts" menu
+1.  Make your changes
+2.  **Commit and push** your changes. This will automatically trigger a building instance for changed targets.
+3.  Wait for the job to finish.
+4.  Collect your files in the `Artifacts` menu of the job's log page.
 
-----
+Many other methods allow you to trigger a building. Refer to [Trigger methods](#trigger-methods)
 
-1. *(可选)* 根据需要修改你的`config.diff`
-2. *(可选)* 根据需要修改你的`scripts/update_feeds.sh`
-3. *(可选)* 根据需要添加新的补丁至patches目录
-4. Commit并Push。如果你想执行`build-inc`任务，你不需要进行任何特殊操作。如果你需要执行`build-package`，你可以在Push前的最后一个commit message中包含这一字符串：`#build-package#`
-5. 等待`build-inc`或`build-package`完成
-6. 在“Artifacts”目录收集文件
+### Advanced usage
 
-### Advanced usage 高级用法
+#### Re-create builder
 
-The following contents require your understanding of the mechanism. See [Mechanism](#mechanism).
+If you have largely modified your configs, e.g. changed the repo or branch of OpenWrt, building may fail because old invalid cache could interfere with compiling.
 
-#### Re-create your building environment 重建编译环境
+It's better to completely re-create your builder. This means no previous cache is used, and all source code will be updated (if no version specified). This behaves the same as a first-time building. You can set the `rebuild` building option to achieve this. For usage of building options, refer to [Manually trigger building and its options](#manually-trigger-building-and-its-options).
 
-If you have largely modified your configurations, incremental building may fail as there could be old configurations remained. It's better to completely re-create your builder. You can specify the `rebuild` building option to achieve this. For usage of building options, refer to [Manually trigger building and its options](#manually-trigger-building-and-its-options).
+#### Rebase your builder
 
+This is faster than re-create a builder. Technically it reuses the builder from a recent first-time building instead of last building. It allow you to shrink the size of your builder without a complete rebuild. You can enable the `rebase` option.
 
-Technically, this is to "re-create your base builder". For definition of "base builder", refer to [Mechanism](#mechanism).
+### Trigger methods
 
-#### Rebase your building environment 重设编译环境
+By default, you can trigger building by
+- Push your changes. BuildWrt will detect if any file affecting a target has been changed. If so the target will be built; otherwise skipped.
+- Commands in commit messages. Include `#target=${TARGET_NAME}#` in the message of the last commit in a push.
+- Deployment events. Support building any commit/branch/tag. Use [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher) to send the event.
+  - Install [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher)
+  - Click "Deploy" button at the top right corner
+  - Fill your Github personal access token in the "Token" prompt
+  - Specify your commit/branch/tag in the "Ref" prompt (e.g. `master`)
+  - Fill `build` in the "Task" prompt
+  - Fill `{"target": "${TARGET_NAME}"}` in the "Payload" prompt (the content should comply with JSON format)
+- Repository dispatch events. Use [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher) to send the event.
+  - Install [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher)
+  - Click "Repo Dispatch" button at the top right corner
+  - Fill your Github personal access token in the "Token" prompt
+  - Fill `build` in the "Type" prompt
+  - Fill `{"target": "${TARGET_NAME}"}` in the "Payload" prompt (in JSON)
 
-Sometimes, you don't need to re-create the base builder. You just need to link previous base builder to current "incremental builder".
+If enabled, triggering is also possible when
+- Your repo is starred by yourself. This makes the "Star" button act as a building trigger for yourself. Enable this by adding the following into the `on` section of `.github/workflows/build-openwrt.yml`:
+  ```yml
+    watch:
+      types: [started]
+  ```
+- Scheduled cron job. Enable this by adding the following into the `on` section of `.github/workflows/build-openwrt.yml`:
+  ```yml
+    # '0 0 * * 0' means sunday midnight
+    # Examples of cron: https://crontab.guru/examples.html
+    schedule:
+      - cron: '0 0 * * 0'
+  ```
 
-Because the incremental builders used in `build-inc` and `build-package` jobs are reusing previous building state, the builder image may grow larger and larger. The builder itself could also fall into some error state. If so, you can re-link them from the base builder.
+### Building options
 
-For rebase `build-inc`, you can use the `use_base` option to base it on the base builder.
+> Refer to [Trigger methods](#trigger-methods) for how to include options
 
-For rebase `build-package`, you can use the `use_base` option to base it on the base builder, or you can use the `use_inc` option to base it on previous incremental builder used in `build-inc`.
-
-#### Manually trigger building and its options
-
-There are two methods for manually triggering and specifying building options:
-- Use [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher).
-  - Repository dispatch event ("Repo Dispatch" button, only support "master" branch)
-    - Specify your job name in the "Type" prompt
-    - Fill your options in the "Payload" prompt (in JSON), or leave "Payload" empty when no option is needed
-  - Deployment event ("Deploy" button, support any commit/branch/tag)
-    - Specify your job name in the "Task" prompt
-    - Specify your branch in the "Ref" prompt
-    - Fill your options in the "Payload" prompt (in JSON), or leave "Payload" empty when no option is needed
-- Including your command and options in your commit message (it must be the commit right before the push)
-  - You can specify your job name by including a string "#JOB_NAME#" in your latest commit message, e.g. `#build-package#`
-  - You can enable boolean options by including a string "#BOOL_OPTION_NAME#" in your latest commit message, e.g. `#debug#`
-  - You can combine job name and options. e.g. `#build-package##debug#` or `#build-package#debug#` are both acceptable (because `indexOf(commit_message, '#JOB_OR_OPT#')` is used for searching them).
+Building options are possible when building is triggered by
+- Commands in commit messages. Include `#OPTION_NAME#` in commit messages. E.g., `#target=x86_64##debug#` (merging two '#' is as well acceptable: `#target=x86_64#debug#`).
+- Deployment events. Include `"OPTION_NAME": true` in the JSON Payload. E.g. `{"target": "x86_64", "debug": true}`.
+- Repository dispatch events. Include `"OPTION_NAME": true` in the JSON Payload. E.g. `{"target": "x86_64", "debug": true}`
 
 All boolean options are by default `false`. The following are options available.
 
-##### Global options
-
-- `debug`(bool): entering tmate during and after building, allowing you to SSH into the Actions
-- `push_when_fail`(bool): always save the builder to Docker Hub even if the building process fails. Not recommended to use
-
-##### Options only for `build-inc`
-
+- `target`(string): the build target name
+- `debug`(bool): entering tmate during and after building, allowing you to SSH into the docker container and Actions. See [Debug and manually configure](#debug-and-manually-configure) for detailed usage.
+- `push_when_fail`(bool): always save the builder even if the building process failed. Not recommended to use
 - `rebuild`(bool): re-create the building environment completely
-- `update_repo`(bool): do `git pull` on main repo. It could fail if any tracked file of the repo has changed.
-- `update_feeds`(bool): do `git pull` on feeds and your manually added packages. It could fail if any tracked file changed.
-- `use_base`(bool): instead of using the job's own previous builder, use latest base builder
+- `rebase`(bool): use first-time builder instead of last builder
+- `update_repo`(bool): update source of main repo. It could fail if any tracked file of the repo has changed.
+- `update_feeds`(bool): update source of feed packages and manually added packages. It could fail if any tracked file changed.
+- `package_only`(bool): only build packages, no firmware
 
-##### Options only for `build-package`
+#### Examples of using building options
 
-- `update_feeds`(bool): same to previous section
-- `use_base`(bool): same to previous section
-- `use_inc`(bool): instead of using the job's own previous builder, use latest incremental builder generated by `build-inc`
+The following are examples for re-creating builder.
 
-##### Examples
-
-###### Use github-repo-dispatcher to rebase building environment
-
-To trigger rebase the incremental builder with SSH debugger enabled:
-1. Open your forked repo
-2. Click "Repo Dispatch" or "Deploy" at the top right corner (install at [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher))
-3. Fill `build-inc` in "Type/Task" prompt
-4. If using "Deploy" trigger, fill your branch/tag/commit in "Ref" prompt (e.g. `master`)
-5. Fill `{"use_base": true, "debug": true}` in "Payload" prompt
-6. Open the job's log page, wait for the SSH command showing up (when debugging, you are allowed to SSH into the job's runner, with the help of tmate.io)
-
-##### Use commit message to re-create building environment
-
+**Through commit message**
 1. Save all the files you changed
-2. At the last commit before push, commit with message "some message #build-inc#rebuild# some message"
+2. At the last commit before push, commit with message:
+   ```
+   Some commit message #target=x86_64#rebuild#
+   ```
 3. Push
-4. Wait for jobs to finish
+
+**Through Repo Dispatch or Deployment events**
+1. Open your forked repo
+2. Click "Repo Dispatch" or "Deploy" at the top right corner (require installing [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher))
+3. Fill `build` in "Type/Task" prompt
+4. If using "Deploy" trigger, fill your branch/tag/commit in "Ref" prompt (e.g. `master`)
+5. Fill `{"target": "x86_64", "rebuild": true}` in "Payload" prompt
+
+### Multiple target profiles
+
+You can have multiple target profiles. They are arranged in
+
+```
+user
+├── default                         # Default profile settings
+│   └── ...
+├── target1                         # First target
+│   ├── config.diff                 # From .config
+│   ├── custom.sh                   # Scripts to be executed before compiling
+│   ├── files                       # Files to be copied to OpenWrt buildroot dir, arranged in same structure
+│   │   └── somefile
+│   └── settings.ini                # Settings
+└── target2
+    ├── config.diff
+    ├── custom.sh
+    ├── packages.txt
+    ├── patches                     # Patches to be applied onto OpenWrt buildroot dir
+    │   └── 001-somepatch.patch
+    └── settings.ini
+```
+
+Here are profiles I am using.
+
+<details>
+  <summary>Click to expand</summary>
+
+```
+user
+├── default
+│   ├── files
+│   │   └── package
+│   │       ├── kernel
+│   │       │   └── linux
+│   │       │       └── modules
+│   │       │           └── netconsole.mk
+│   │       ├── openwrt-packages
+│   │       │   ├── libJudy
+│   │       │   │   ├── Makefile
+│   │       │   │   └── patches
+│   │       │   │       ├── 100-host-compile-JudyTablesGen.patch
+│   │       │   │       └── 300-makefile-nodoc-notest.patch
+│   │       │   └── netconsole
+│   │       │       ├── Makefile
+│   │       │       └── files
+│   │       │           ├── netconsole.config
+│   │       │           └── netconsole.init
+│   │       └── system
+│   │           └── fstools
+│   │               └── 0010-fstools-block-make-extroot-mount-preparation-more-robust.patch
+│   └── patches
+│       ├── 000-download-max-time.patch
+│       ├── 002-netdata-with-dbengine.patch
+│       ├── 003-netdata-init-with-TZ.patch
+│       └── 006-autossh-init.patch
+├── wdr4310v1
+│   ├── config.diff
+│   ├── custom.sh
+│   ├── files
+│   │   └── package
+│   │       ├── firmware
+│   │       │   └── wireless-regdb
+│   │       │       └── patches
+│   │       │           └── 601-reghack.patch
+│   │       ├── kernel
+│   │       │   └── mac80211
+│   │       │       └── patches
+│   │       │           └── ath
+│   │       │               └── 499-ath9k_reghack.patch
+│   │       └── network
+│   │           └── services
+│   │               └── hostapd
+│   │                   └── patches
+│   │                       └── 399-reghack.patch
+│   ├── packages.txt
+│   └── settings.ini
+└── x86_64
+    ├── config.diff
+    ├── custom.sh
+    ├── packages.txt
+    ├── patches
+    │   ├── 005-openclash-clashr.patch.disable
+    │   └── 007-transmission-init.patch
+    └── settings.ini
+```
+</details>
+
+#### Default profile
+
+You can provide default profile in `user/default`. The files in `user/${TARGET_NAME}` and `user/default` will be automatically merged (internally creating a folder named `user/current`). When they have conflicted files, generally file-level overriding strategy is used; files in `user/${TARGET_NAME}` will overwrite same files in `user/default`, with only one exception `settings.ini`.
+
+For `settings.ini`, option-level instead of file-level overriding is the strategy for merging. For example, for option `REPO_BRANCH`, overriding will happen onto the same option in `user/default/settings.ini` if it is set in `user/${TARGET_NAME}/settings.ini`, but option `REPO_URL` won't be affected by this fact (the two options are independent).
+
+### Manually adding packages
+
+Use `user/${TARGET_NAME}/packages.txt`
+
+```
+Packages will be put into 'package/openwrt-packages' dir
+Note that to have it compiled, you also have to set its CONFIG_* options
+The format is:
+PACKAGE_NAME PACKAGE_GIT [ref=REF] [root=ROOT] [subdir=SUBDIR] [rename=RENAME] [mkfile-dir=MKFILE_DIR] [use-latest-tag] [override]
+REF is optional. You can specify branch/tag/commit
+ROOT is optional. Specifying the parent path under 'package/' of this package. Defaults to 'openwrt-packages'.
+SUBDIR is optional. The path of subdir within the repo can be specified
+RENAME is optional. It allows renaming of PKG_NAME in Makefile of the package
+MKFILE_DIR is optional. You can specify the dir of Makefile, only used when RENAME is specified.
+'use-latest-tag' will retrieve latest release as the REF. It shouldn't be specified together with REF. Currently only github repo is supported.
+'override' will delete packages that are already existed.
+
+Examples:
+mentohust https://github.com/KyleRicardo/MentoHUST-OpenWrt-ipk.git
+luci-app-mentohust https://github.com/BoringCat/luci-app-mentohust.git ref=1db86057
+syslog-ng https://github.com/openwrt/packages.git ref=master root=feeds/packages/admin subdir=admin/syslog-ng override
+```
 
 ## Details
 
-### Mechanism
-
-[TODO] Probably a figure is better
-
-For convenience, assume docker image for storing builder
-- `IMAGE_NAME=tete1030/openwrt_x86_64` (abbreviated to `t/o`)
-- `IMAGE_TAG=latest`
-
-There are three builders:
-
-- When doing first-time building or rebuilding, the `build-inc` mode setups "base builder" and builds OpenWrt freshly. It produces a firmware and a "base builder". The builder is named as `t/o:latest` and stored in Docker Hub. It is further linked to `t/o:latest-inc`, which is an incremental build used for future use.
-- For every push, the `build-inc` mode setups "incremental builder `t/o:latest-inc`" based on its own previous "incremental builder `t/o:latest-inc`" (same name). It also builds a new firmware. Finally it saves back the new builder to Docker Hub, overwriting the old one.
-- For every push, the `build-package` mode setups "incremental builder `t/o:latest-package`" based on its own previous "incremental builder `t/o:latest-package`" (same name). If the previous one does not exist, it uses the base builder. This mode also builds packages (*.ipkg). Finally it saves back the new builder to Docker Hub, overwriting the old one.
-
-### Success building job examples
-
-[coolsnowwolf/lede](https://github.com/coolsnowwolf/lede):
-- [`build-base` (deprecated)](https://github.com/tete1030/openwrt-fastbuild-actions/runs/359974704)
-- [`build-inc`](https://github.com/tete1030/openwrt-fastbuild-actions/runs/360084146)
-- [`build-package`](https://github.com/tete1030/openwrt-fastbuild-actions/runs/360084313)
-
-[openwrt/openwrt;openwrt-19.07](https://github.com/openwrt/openwrt/tree/openwrt-19.07):
-- [`build-base` (deprecated)](https://github.com/tete1030/openwrt-fastbuild-actions/commit/7757f6741a804b84f2f6fa6c03272e322ce6a8e9/checks?check_suite_id=370526615)
-- [`build-inc`](https://github.com/tete1030/openwrt-fastbuild-actions/runs/360106903)
-- [`build-package`](https://github.com/tete1030/openwrt-fastbuild-actions/runs/360107046)
-
 ### Building process explained
 
-I'll now explain here the detailed building process of each mode.
+> Note: `user/current/*` files are files merged from `user/${TARGET_NAME}/*` and `user/default/*`.
 
-#### `build-inc`
+#### First-time building
 
-1. Pull `${BUILDER_NAME}:${BUILDER_TAG}-inc` from Docker Hub. If the tag does not exist or `use_base` building option is set, link `${BUILDER_NAME}:${BUILDER_TAG}` to `${BUILDER_NAME}:${BUILDER_TAG}-inc`. If `${BUILDER_NAME}:${BUILDER_TAG}` also does not exist, set building option `rebuild` to `true`.
-2. `initenv.sh`, set up building environment only when `rebuild`.
-3. `update_repo.sh`. It will do `git clone` or `git pull` for main repo only when `update_repo` or `rebuild` option is set
-4. `update_feeds.sh`. It will download you manually added packages, and do `git pull` for existing packages only when `update_feeds` option is set.
-5. `customize.sh`. Apply patches only when a patch has not been already applied. Load `config.diff` to `.config`, execute `make defconfig`
-6. `download.sh`, download/update package source code that are not already downloaded
-7. `compile.sh`, Multi/single-thread compile
-8. Save this new builder to Docker Hub's `${BUILDER_NAME}:${BUILDER_TAG}-inc`. If `rebuild`, link it back to `${BUILDER_NAME}:${BUILDER_TAG}`
-9. Copy out from docker and upload files to Artifacts
-    - `OpenWrt_bin`: all binaries files, including packages and firmwares
-    - `OpenWrt_firmware`: firmware only
+1. `update_repo.sh`. Download OpenWrt source code.
+2. `update_feeds.sh`. Install all packages from feeds and manually added ones defined in `user/current/packages.txt`.
+3. `customize.sh`. Copy `user/current/.config` files, copy `user/current/files`, apply patches in `user/current/patches`, Execute `user/current/custom.sh`.
+4. `download.sh`, Execute `make download`
+5. `compile.sh`, Multi/single-thread compile
+6. Upload current builder both as `${BUILDER_NAME}:${BUILDER_TAG}` and `${BUILDER_NAME}:${BUILDER_TAG}-inc` to docker registry.
+7. Upload files to Artifacts
+    - `OpenWrt_packages`: all packages
+    - `OpenWrt_firmware`: firmware
 
-#### `build-package`
+#### Following buildings
 
-1. Pull `${BUILDER_NAME}:${BUILDER_TAG}-package` from Docker Hub. If the tag does not exist or when `use_base` option is set, link current `${BUILDER_NAME}:${BUILDER_TAG}` to `${BUILDER_NAME}:${BUILDER_TAG}-package` (Or link `${BUILDER_NAME}:${BUILDER_TAG}-inc` to `${BUILDER_NAME}:${BUILDER_TAG}-package` when the `use_inc` option is set)
-2. Unlike other building processes, `update_repo.sh` is not executed
-3. `update_feeds.sh`. It will always download you manually added packages, and do `git pull` for existing packages only when `update_feeds` option is set.
-4. `customize.sh`, apply patches only when a patch has not been already applied
-5. `download.sh`, download/update package source code that are not already downloaded
+1. Pull `${BUILDER_NAME}:${BUILDER_TAG}-inc` (if `rebase` is enabled, use `${BUILDER_NAME}:${BUILDER_TAG}` instead) from docker registry.
+2. `update_repo.sh`. Only when `update_repo` option is set, update OpenWrt source code.
+3. `update_feeds.sh`. Install missing packages in `user/current/packages.txt`. Only when `update_feeds` option is set, update all feed packages and manually added packages.
+4. `customize.sh`. Copy `user/current/.config` files, copy `user/current/files`, apply patches in `user/current/patches`, Execute `user/current/custom.sh`.
+5. `download.sh`, Execute `make download`
 6. `compile.sh`, Multi/single-thread compile
-7. Save this new builder to Docker Hub's `${BUILDER_NAME}:${BUILDER_TAG}-package`
+7. Upload current builder as `${BUILDER_NAME}:${BUILDER_TAG}-inc` to docker registry (overwrite old one).
 8. Upload files to Artifacts
     - `OpenWrt_packages`: all packages
-    - `OpenWrt_new_packages`: only newly produced packages of this building
+    - `OpenWrt_firmware`: firmware only
+
+### Squashing Strategy
+
+Squashing is used for compressing your builders. When too many layers are stacked in a docker image, it usually has a large amount of duplicated and unused files wasting space. Squashing will compress all docker layers into single one to improve space efficiency. This is automatically executed when building if the number of layers exceeds a threshold. However it takes extra time to execute. You can enable periodic and manual squashing job by uncommenting trigger events in `.github/workflows/squash.yml`.
+
+## Debugging and manually configuring
+
+Thanks to [tmate](https://tmate.io/), you can enter into both the docker containers and GitHub Actions runners through SSH to debug and manually change your configurations, e.g. `make menuconfig`. To do it, you have to enable the building option: `debug`. See [Building Options](#building-options) for ways of using options.
+
+![SSH](docs/imgs/debug.png)
+
+For safety of your sensitive information, you **must** either set `SLACK_WEBHOOK_URL` or `TMATE_ENCRYPT_PASSWORD` in the **Secrets** page to protect the tmate connection info. Refer to [tete1030/safe-debugger-action/README.md](https://github.com/tete1030/safe-debugger-action/blob/master/README.md) for details.
+
+Note that the configuration changes you made should only be for **temporary usage**. Even though your changes in the docker container will be saved to Docker Hub, there are situations where you manual configuration may lost:
+1. The `rebuild` or `rebase` option is set
+2. Some files will be overwritten during every building. For example, if you have executed `make menuconfig` in the container, the changes of the `.config` file seem saved. In fact, during next building, the `config.diff` file will be copied to overwrite the old `.config`.
+
+To make permanent changes, it is always recommended to use the `user/${TARGET_NAME}` mechanism.
+
+### Important directories
+
+Here list the directories (inside docker containers) that are used internally when building
+
+- `${OPENWRT_CUR_DIR}`: OpenWrt directory that is currently working on (equal to either `${OPENWRT_COMPILE_DIR}` or `${OPENWRT_SOURCE_DIR}`)
+- `${OPENWRT_COMPILE_DIR}`: OpenWrt directory used for compiling (normally in docker container's `/home/builder/openwrt`)
+- `${OPENWRT_SOURCE_DIR}`: OpenWrt directory used for creating source code tree (normally in docker container's `/tmp/builder/openwrt`)
+
+When debugging, in most cases you should use `${OPENWRT_CUR_DIR}` as this is the dir that the builder is currently working on and where error happened.
 
 ## FAQs
 
-### Why I cannot see any tag on Docker Hub website?
+### Why all targets seem triggered when only some are intended?
 
-All tags actually exist but could be invisible. Caused by known problem of buildx:
-- https://github.com/docker/hub-feedback/issues/1906
-- https://github.com/docker/buildx/issues/173
+This is expected. We use a script instead of workflow conditions to select which jobs should be executed. This means every target would be launched to run the selection script. Targets that are not intended will quit quickly. This method allows better complexity for the selection process.
 
 ## Todo
 
-- [x] Merge three building modes into one to simplify the process
-- [ ] SSH into docker container instead of just the runner (for `make menuconfig`)
-- [x] Allow customizing trigger event
-- [x] Allow specify building job in commit message
-- [x] Automatically linking from base builder to builders for `build-inc` and `build-package` when not existing
-- [ ] Optimize README
-  - [x] Simplfy documentation
-  - [ ] Add Chinese version of "Usage"
-  - [ ] Add a figure to "Mechanism"
-  - [x] Describe mechanism
-  - [x] Describe building process
-  - [x] Describe using [tete1030/github-repo-dispatcher](https://github.com/tete1030/github-repo-dispatcher) to trigger building with extra options
-- [x] Optimize comments in `build-openwrt.yml` and `docker.sh`
-- [x] Optimize `build-openwrt.yml`, making options cleaner
-- [ ] Allow deterministic building (by fixing commit of main repo and feeds)
+See [TODO](TODO)
 
 ## Acknowledgments
 
@@ -312,7 +388,7 @@ All tags actually exist but could be invisible. Caused by known problem of build
 
 Most files under
 
-[MIT](https://github.com/tete1030/openwrt-fastbuild-actions/blob/master/LICENSE) © Texot
+[MIT](LICENSE) © Texot
 
 Original idea and some files under
 
